@@ -2,13 +2,13 @@ from collections import defaultdict
 from math import ceil
 
 import numpy as np
+from numpy.lib import format
 from pycompss.api.api import compss_wait_on
 from pycompss.api.parameter import Type, COLLECTION_IN, Depth, COLLECTION_INOUT
 from pycompss.api.task import task
 from scipy import sparse as sp
 from scipy.sparse import issparse, csr_matrix
 from sklearn.utils import check_random_state
-from numpy.lib import format
 
 
 class Array(object):
@@ -1007,6 +1007,54 @@ def _read_from_buffer(data, dtype, shape, block_size, out_blocks):
 
     for i in range(len(out_blocks)):
         out_blocks[i] = arr[:, i * block_size:(i + 1) * block_size]
+
+
+def load_mdcrd_file(path, block_size, n_atoms):
+    n_coord = 3
+    line_length = 10
+    n_cols = n_atoms * n_coord
+    n_blocks = ceil(n_cols / block_size[1])
+
+    lines_per_snap = ceil((n_atoms * n_coord) / line_length)
+    lines_per_block = block_size[0] * lines_per_snap
+
+    n_lines = 0
+    lines = []
+    blocks = []
+
+    with open(path, "r") as f:
+        next(f)  # skip header
+
+        for line in f:
+            n_lines += 1
+            lines.append(np.array(line.split(), dtype=float))
+
+            if len(lines) == lines_per_block:
+                out_blocks = [object() for _ in range(n_blocks)]
+                _read_crd_lines(lines, block_size[1], n_cols, out_blocks)
+                blocks.append(out_blocks)
+                lines = []
+
+    if lines:
+        out_blocks = [object() for _ in range(n_blocks)]
+        _read_crd_lines(lines, block_size[1], n_cols, out_blocks)
+        blocks.append(out_blocks)
+
+    n_samples = int(n_lines / lines_per_snap)
+
+    return Array(blocks, top_left_shape=block_size, reg_shape=block_size,
+                 shape=(n_samples, n_cols), sparse=False)
+
+
+@task(out_blocks=COLLECTION_INOUT, returns=1)
+def _read_crd_lines(lines, block_size, n_cols, out_blocks):
+    arr = np.hstack(lines)
+
+    n_samples = int(arr.shape[0] / n_cols)
+    samples = arr.reshape((n_samples, n_cols))
+
+    for i, j in enumerate(range(0, n_cols, block_size)):
+        out_blocks[i] = samples[:, j:j + block_size]
 
 
 @task(out_blocks=COLLECTION_INOUT)
