@@ -1,6 +1,9 @@
 import numbers
 
 import numpy as np
+from dislib.data.array import Array
+from pycompss.api.parameter import COLLECTION_IN, Type, Depth, INOUT
+from pycompss.api.task import task
 
 
 def fit_and_score(estimator, train_ds, validation_ds, scorer, parameters,
@@ -11,6 +14,33 @@ def fit_and_score(estimator, train_ds, validation_ds, scorer, parameters,
     estimator.fit(x_train, y_train, **fit_params)
     x_test, y_test = validation_ds
     test_scores = _score(estimator, x_test, y_test, scorer)
+
+    return [test_scores]
+
+
+@task(est=INOUT, blocks_x={Type: COLLECTION_IN, Depth: 2},
+      blocks_y={Type: COLLECTION_IN, Depth: 2})
+def fit_sklearn_estimator(est, blocks_x, blocks_y, **fit_params):
+    x = Array._merge_blocks(blocks_x)
+    y = Array._merge_blocks(blocks_y)
+    est.fit(x, y, **fit_params)
+
+@task(blocks_x={Type: COLLECTION_IN, Depth: 2}, blocks_y={Type: COLLECTION_IN, Depth: 2},
+      returns=1)
+def score_sklearn_estimator(est, scorer,  blocks_x, blocks_y):
+    x = Array._merge_blocks(blocks_x)
+    y = Array._merge_blocks(blocks_y)
+    return _score(est, x, y, scorer)
+
+
+def sklearn_fit_and_score(estimator, train_ds, validation_ds, scorer,
+                          parameters, fit_params):
+    if parameters is not None:
+        estimator.set_params(**parameters)
+    x_train, y_train = train_ds
+    fit_sklearn_estimator(estimator, x_train._blocks, y_train._blocks, **fit_params)
+    x_test, y_test = validation_ds
+    test_scores = score_sklearn_estimator(estimator, scorer, x_test._blocks, y_test._blocks)
 
     return [test_scores]
 
