@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 from math import ceil
 
@@ -10,6 +11,8 @@ from pycompss.api.task import task
 from scipy import sparse as sp
 from scipy.sparse import issparse, csr_matrix
 from sklearn.utils import check_random_state
+
+_CRD_LINE_SIZE = 81
 
 
 class Array(object):
@@ -1013,91 +1016,91 @@ def _read_from_buffer(data, dtype, shape, block_size, out_blocks):
 def load_mdcrd_file(path, block_size, n_atoms, copy=False):
     n_coord = 3
     line_length = 10
-    n_cols = n_atoms * n_coord
-    n_vblocks = ceil(n_cols / block_size[1])
 
+    bytes_per_value = 6
+    bytes_per_gap = 2
+
+    n_cols = n_atoms * n_coord
+    n_hblocks = ceil(n_cols / block_size[1])
     lines_per_snap = ceil((n_atoms * n_coord) / line_length)
-    lines_per_block = block_size[0] * lines_per_snap
+
+    last_line_length = n_cols % 10
+    last_line_size = last_line_length * bytes_per_value + \
+                     (last_line_length - 1) * bytes_per_gap + 3
+
+    bytes_per_snap = (lines_per_snap - 1) * _CRD_LINE_SIZE + last_line_size
+    bytes_per_block = block_size[0] * bytes_per_snap
 
     if not copy:
-        return _load_mdcrd(path, block_size, n_cols, n_vblocks, lines_per_snap,
-                           lines_per_block)
+        return _load_mdcrd(path, block_size, n_cols, n_hblocks,
+                           bytes_per_snap, bytes_per_block)
     else:
-        return _load_mdcrd_copy(path, block_size, n_vblocks, n_cols,
-                                lines_per_snap, lines_per_block)
+        return _load_mdcrd_copy(path, block_size, n_cols, n_hblocks,
+                                bytes_per_snap, bytes_per_block)
 
 
-def _load_mdcrd_copy(path, block_size, n_vblocks, n_cols,
-                     lines_per_snap, lines_per_block):
-    with open(path, "r") as f:
-        for n_lines, _ in enumerate(f):
-            pass
-
-    n_hblocks = ceil(n_lines / lines_per_block)
+def _load_mdcrd_copy(path, block_size, n_cols, n_hblocks, bytes_per_snap,
+                     bytes_per_block):
+    file_size = os.stat(path).st_size - _CRD_LINE_SIZE
     blocks = []
+    read_size = bytes_per_block * block_size[0]
 
-    for i in range(n_hblocks):
-        start = i * lines_per_block
-        end = (i + 1) * lines_per_block
-
-        out_blocks = [object() for _ in range(n_vblocks)]
-        _read_crd_file(path, block_size[1], n_cols, start, end, out_blocks)
+    for i in range(0, file_size, read_size):
+        out_blocks = [object() for _ in range(n_hblocks)]
+        _read_crd_file(path, i, read_size, block_size[1], n_cols, out_blocks)
         blocks.append(out_blocks)
 
-    n_samples = int(n_lines / lines_per_snap)
+    n_samples = int(file_size / bytes_per_snap)
 
     return Array(blocks, top_left_shape=block_size, reg_shape=block_size,
                  shape=(n_samples, n_cols), sparse=False)
 
 
-def _load_mdcrd(path, block_size, n_cols, n_blocks,
-                lines_per_snap, lines_per_block):
-    n_lines = 0
-    lines = []
+def _load_mdcrd(path, block_size, n_cols, n_blocks, bytes_per_snap,
+                bytes_per_block):
     blocks = []
 
-    with open(path, "r") as f:
-        next(f)  # skip header
+    file_size = os.stat(path).st_size - _CRD_LINE_SIZE
 
-        for line in f:
-            n_lines += 1
-            lines.append(line.strip())
+    try:
+        fid = open(path, "rb")
+        fid.read(_CRD_LINE_SIZE)  # skip header
+        read_size = bytes_per_block * block_size[0]
 
-            if len(lines) == lines_per_block:
-                out_blocks = [object() for _ in range(n_blocks)]
-                _read_crd_lines(lines, block_size[1], n_cols, out_blocks)
-                blocks.append(out_blocks)
-                lines = []
+        for _ in range(0, file_size, read_size):
+            data = fid.read(read_size)
+            out_blocks = [object() for _ in range(n_blocks)]
+            _read_crd_bytes(data, block_size[1], n_cols, out_blocks)
+            blocks.append(out_blocks)
+    finally:
+        fid.close()
 
-    if lines:
-        out_blocks = [object() for _ in range(n_blocks)]
-        _read_crd_lines(lines, block_size[1], n_cols, out_blocks)
-        blocks.append(out_blocks)
-
-    n_samples = int(n_lines / lines_per_snap)
+    n_samples = int(file_size / bytes_per_snap)
 
     return Array(blocks, top_left_shape=block_size, reg_shape=block_size,
                  shape=(n_samples, n_cols), sparse=False)
 
 
-@task(path=FILE_IN, out_blocks=COLLECTION_INOUT)
-def _read_crd_file(path, vblock_size, n_cols, start, end, out_blocks):
-    with open(path, "r") as f:
-        next(f)  # skip header
-
-        for _ in range(start):
-            next(f)
-
-        lines = []
-
-        while len(lines) < end - start:
-            lines.append(np.array(f.readline().split(), dtype=float))
-
-    arr = np.hstack(lines)
+@task(out_blocks=COLLECTION_INOUT)
+def _read_crd_bytes(data, hblock_size, n_cols, out_blocks):
+    arr = np.genfromtxt([data.decode().replace("\n", "")])
     arr = arr.reshape((-1, n_cols))
 
     for i in range(len(out_blocks)):
-        out_blocks[i] = arr[:, i * vblock_size:(i + 1) * vblock_size]
+        out_blocks[i] = arr[:, i * hblock_size:(i + 1) * hblock_size]
+
+
+@task(path=FILE_IN, out_blocks=COLLECTION_INOUT)
+def _read_crd_file(path, start, read_size, hblock_size, n_cols, out_blocks):
+    with open(path, "rb") as fid:
+        fid.seek(start + _CRD_LINE_SIZE)  # skip header and go to start
+        data = fid.read(read_size)
+
+    arr = np.genfromtxt([data.decode().replace("\n", "")])
+    arr = arr.reshape((-1, n_cols))
+
+    for i in range(len(out_blocks)):
+        out_blocks[i] = arr[:, i * hblock_size:(i + 1) * hblock_size]
 
 
 @task(out_blocks=COLLECTION_INOUT)
