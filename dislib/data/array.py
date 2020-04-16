@@ -1043,11 +1043,11 @@ def _load_mdcrd_copy(path, block_size, n_cols, n_hblocks, bytes_per_snap,
                      bytes_per_block):
     file_size = os.stat(path).st_size - _CRD_LINE_SIZE
     blocks = []
-    read_size = bytes_per_block * block_size[0]
 
-    for i in range(0, file_size, read_size):
+    for i in range(0, file_size, bytes_per_block):
         out_blocks = [object() for _ in range(n_hblocks)]
-        _read_crd_file(path, i, read_size, block_size[1], n_cols, out_blocks)
+        _read_crd_file(path, i, bytes_per_block, block_size[1], n_cols,
+                       out_blocks)
         blocks.append(out_blocks)
 
     n_samples = int(file_size / bytes_per_snap)
@@ -1065,10 +1065,9 @@ def _load_mdcrd(path, block_size, n_cols, n_blocks, bytes_per_snap,
     try:
         fid = open(path, "rb")
         fid.read(_CRD_LINE_SIZE)  # skip header
-        read_size = bytes_per_block * block_size[0]
 
-        for _ in range(0, file_size, read_size):
-            data = fid.read(read_size)
+        for _ in range(0, file_size, bytes_per_block):
+            data = fid.read(bytes_per_block)
             out_blocks = [object() for _ in range(n_blocks)]
             _read_crd_bytes(data, block_size[1], n_cols, out_blocks)
             blocks.append(out_blocks)
@@ -1083,7 +1082,7 @@ def _load_mdcrd(path, block_size, n_cols, n_blocks, bytes_per_snap,
 
 @task(out_blocks=COLLECTION_INOUT)
 def _read_crd_bytes(data, hblock_size, n_cols, out_blocks):
-    arr = np.genfromtxt([data.decode().replace("\n", "")])
+    arr = np.fromstring(data.decode(), sep=" ")
     arr = arr.reshape((-1, n_cols))
 
     for i in range(len(out_blocks)):
@@ -1096,7 +1095,7 @@ def _read_crd_file(path, start, read_size, hblock_size, n_cols, out_blocks):
         fid.seek(start + _CRD_LINE_SIZE)  # skip header and go to start
         data = fid.read(read_size)
 
-    arr = np.genfromtxt([data.decode().replace("\n", "")])
+    arr = np.fromstring(data.decode(), sep=" ")
     arr = arr.reshape((-1, n_cols))
 
     for i in range(len(out_blocks)):
