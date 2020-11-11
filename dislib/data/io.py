@@ -1,6 +1,8 @@
+import os
 import numpy as np
 from numpy.lib import format
-from pycompss.api.parameter import COLLECTION_OUT, Type, Depth
+from pycompss.api.parameter import COLLECTION_OUT, Type, Depth, \
+    COLLECTION_FILE_IN
 from pycompss.api.task import task
 
 from dislib.data.array import Array
@@ -162,6 +164,84 @@ def load_npy_file(path, block_size):
         fid.close()
 
 
+def load_hstack_npy_files(path, cols_per_block=None):
+    """ Loads the .npy files in a directory into a ds-array, stacking them
+    horizontally, like (A|B|C). The order of concatenation is arbitrary.
+
+    At least 1 valid .npy file must exist in the directory, and every .npy file
+    must contain a valid array. Every array must have the same dtype, order,
+    and number of rows.
+
+    The blocks of the returned ds-array will have the same number of rows as
+    the input arrays, and cols_per_block columns, which defaults to the number
+    of columns of the first array.
+
+    Parameters
+    ----------
+    path : string
+        Folder path.
+    cols_per_block : tuple (int, int)
+        Number of columns of the blocks for the output ds-array. If None, the
+        number of columns of the first array is used.
+
+    Returns
+    -------
+    x : ds-array
+        A distributed representation (ds-array) of the stacked arrays.
+    """
+    folder_paths = [os.path.join(path, name) for name in os.listdir(path)]
+    # Full path of .npy files in the folder
+    files = [pth for pth in folder_paths
+             if os.path.isfile(pth) and pth[-4:] == '.npy']
+    # Read the header of the first file to get shape, order, and dtype
+    with open(files[0], "rb") as fid:
+        version = format.read_magic(fid)
+        format._check_version(version)
+        shape0, order0, dtype0 = format._read_array_header(fid, version)
+    rows = shape0[0]
+    if cols_per_block is None:
+        cols_per_block = shape0[1]
+    # Check that all files have the same number of rows, order and datatype,
+    # and store the number of columns for each file.
+    files_cols = [shape0[1]]
+    for filename in files[1:]:
+        with open(filename, "rb") as fid:
+            version = format.read_magic(fid)
+            format._check_version(version)
+            shape, order, dtype = format._read_array_header(fid, version)
+            if shape[0] != shape0[0] or order0 != order or dtype0 != dtype:
+                raise AssertionError()
+            files_cols.append(shape[1])
+
+    # Compute the parameters block_files, start_col and end_col for each block,
+    # and call the task _load_hstack_npy_block() to generate each block.
+    blocks = []
+    file_idx = 0
+    start_col = 0
+    while file_idx < len(files):
+        block_files = [files[file_idx]]
+        cols = files_cols[file_idx] - start_col
+        while cols < cols_per_block:  # while block not completed
+            if file_idx + 1 == len(files):  # last file
+                break
+            file_idx += 1
+            block_files.append(files[file_idx])
+            cols += files_cols[file_idx]
+        # Compute end_col of last file in block (last block may be smaller)
+        end_col = files_cols[file_idx] - max(0, (cols - cols_per_block))
+        blocks.append(_load_hstack_npy_block(block_files, start_col, end_col))
+        if end_col == files_cols[file_idx]:  # file completed
+            file_idx += 1
+            start_col = 0
+        else:  # file uncompleted
+            start_col = end_col
+
+    return Array(blocks=[blocks], top_left_shape=(rows, cols_per_block),
+                 reg_shape=(rows, cols_per_block),
+                 shape=(rows, sum(files_cols)),
+                 sparse=False)
+
+
 @task(out_blocks=COLLECTION_OUT)
 def _read_from_buffer(data, dtype, shape, block_size, out_blocks):
     arr = np.frombuffer(data, dtype=dtype)
@@ -204,3 +284,14 @@ def _read_svmlight(lines, out_blocks, col_size, n_features, store_sparse):
 
     # Position 1 contains the y block
     out_blocks[1][0] = y.reshape(-1, 1)
+
+
+@task(block_files=COLLECTION_FILE_IN)
+def _load_hstack_npy_block(block_files, start_col, end_col):
+    if len(block_files) == 1:
+        return np.load(block_files[0])[:, start_col:end_col]
+    arrays = [np.load(block_files[0])[:, start_col:]]
+    for file in block_files[1:-1]:
+        arrays.append(np.load(file))
+    arrays.append(np.load(block_files[-1])[:, :end_col])
+    return np.concatenate(arrays, axis=1)
