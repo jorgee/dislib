@@ -1,5 +1,6 @@
 import numpy as np
 from numpy.lib import format
+from pycompss.api.constraint import constraint
 from pycompss.api.parameter import COLLECTION_OUT, Type, Depth
 from pycompss.api.task import task
 
@@ -162,6 +163,7 @@ def load_npy_file(path, block_size):
         fid.close()
 
 
+@constraint(computing_units="${computingUnits}")
 @task(out_blocks=COLLECTION_OUT)
 def _read_from_buffer(data, dtype, shape, block_size, out_blocks):
     arr = np.frombuffer(data, dtype=dtype)
@@ -171,6 +173,7 @@ def _read_from_buffer(data, dtype, shape, block_size, out_blocks):
         out_blocks[i] = arr[:, i * block_size:(i + 1) * block_size]
 
 
+@constraint(computing_units="${computingUnits}")
 @task(out_blocks=COLLECTION_OUT)
 def _read_lines(lines, block_size, delimiter, out_blocks):
     samples = np.genfromtxt(lines, delimiter=delimiter)
@@ -182,6 +185,7 @@ def _read_lines(lines, block_size, delimiter, out_blocks):
         out_blocks[i] = samples[:, j:j + block_size]
 
 
+@constraint(computing_units="${computingUnits}")
 @task(out_blocks={Type: COLLECTION_OUT, Depth: 2})
 def _read_svmlight(lines, out_blocks, col_size, n_features, store_sparse):
     from tempfile import SpooledTemporaryFile
