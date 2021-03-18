@@ -5,7 +5,7 @@ from scipy.sparse import issparse, csr_matrix
 from sklearn.base import BaseEstimator
 
 from dislib.data.array import Array
-from dislib.math.base import svd, svd_new
+from dislib.math.base import svd
 from math import ceil
 
 
@@ -155,10 +155,7 @@ class PCA(BaseEstimator):
         return self
 
     def _fit_svd(self, x):
-        import os
-        use_old = bool(int(os.environ.get('USE_OLD_SVD')))
-        svd_callable = svd if use_old else svd_new
-        self._u, self._s, v = svd_callable(x, copy=False, eps=self.eps)
+        self._u, self._s, v = svd(x, copy=False, eps=self.eps)
 
         if self.n_components:
             self._u = self._u[:, :self.n_components]
