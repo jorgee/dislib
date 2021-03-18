@@ -204,6 +204,126 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
         return s
 
 
+def svd_new(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
+    """ Performs singular value decomposition of a ds-array via the one-sided
+    block Jacobi algorithm described in Arbenz and Slapnicar [1]_ and
+    Dongarra et al. [2]_.
+
+    Singular value decomposition is a factorization of the form A = USV',
+    where U and V are unitary matrices and S is a rectangular diagonal matrix.
+
+    Parameters
+    ----------
+    a : ds-array, shape=(m, n)
+        Input matrix (m >= n). Needs to be partitioned in two column blocks at
+        least due to the design of the block Jacobi algorithm.
+    compute_uv : boolean, optional (default=True)
+        Whether or not to compute u and v in addition to s.
+    sort : boolean, optional (default=True)
+        Whether to return sorted u, s and v. Sorting requires a significant
+        amount of additional computation.
+    copy : boolean, optional (default=True)
+        Whether to create a copy of a or to apply transformations on a
+        directly. Only valid if a is regular (i.e., top left block is of
+        regular shape).
+    eps : float, optional (default=1e-9)
+        Tolerance for the convergence criterion.
+
+    Returns
+    -------
+    u : ds-array, shape=(m, n)
+        U matrix. Only returned if compute_uv is True.
+    s : ds-array, shape=(1, n)
+        Diagonal entries of S.
+    v : ds-array, shape=(n, n)
+        V matrix. Only returned if compute_uv is True.
+
+    Raises
+    ------
+    ValueError
+        If a has less than 2 column blocks or m < n.
+
+    References
+    ----------
+    .. [1] Arbenz, P. and Slapnicar, A. (1995). An Analysis of Parallel
+        Implementations of the Block-Jacobi Algorithm for Computing the SVD. In
+        Proceedings of the 17th International Conference on Information
+        Technology Interfaces ITI (pp. 13-16).
+
+    .. [2] Dongarra, J., Gates, M., Haidar, A. et al. (2018). The singular
+        value decomposition: Anatomy of optimizing an algorithm for extreme
+        scale. In SIAM review, 60(4) (pp. 808-865).
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> import dislib as ds
+    >>> x = ds.random_array((10, 6), (2, 2), random_state=7)
+    >>> u, s, v = ds.svd(x)
+    >>> u = u.collect()
+    >>> s = np.diag(s.collect())
+    >>> v = v.collect()
+    >>> print(np.allclose(x.collect(), u @ s @ v.T))
+    """
+    if a._n_blocks[1] < 2:
+        raise ValueError("Not enough column blocks to compute SVD.")
+
+    if a.shape[0] < a.shape[1]:
+        raise ValueError("The number of rows of the input matrix is lower "
+                         "than the number of columns")
+
+    if not a._is_regular():
+        x = a.rechunk(a._reg_shape)
+    elif copy:
+        x = a.copy()
+    else:
+        x = a
+
+    if compute_uv:
+        v = identity(x.shape[1], (x._reg_shape[1], x._reg_shape[1]))
+
+    checks = True
+
+    while not _check_convergence_svd(checks):
+        checks = []
+
+        #pairings = itertools.product(range(x._n_blocks[1]),
+        #                             range(x._n_blocks[1]))
+
+        for j in range(x._n_blocks[1]):
+            for i in range(j):
+                coli_x = x._get_col_block(i)
+                colj_x = x._get_col_block(j)
+
+                add_i_blocks_to_rotate = []
+                add_j_blocks_to_rotate = []
+                if compute_uv:
+                    add_i_blocks_to_rotate.append(v._get_col_block(i)._blocks)
+                    add_j_blocks_to_rotate.append(v._get_col_block(j)._blocks)
+
+                check = _compute_rotation_and_rotate(
+                    coli_x._blocks, colj_x._blocks, eps,
+                    add_i_blocks_to_rotate, add_j_blocks_to_rotate
+                )
+                checks.append(check)
+
+    s = x.norm(axis=0)
+
+    if sort:
+        sorting = _sort_s(s._blocks)
+
+    if compute_uv:
+        if sort:
+            u = _compute_u_sorted(x, sorting)
+            v = _sort_v(v, sorting)
+        else:
+            u = _compute_u(x)
+
+        return u, s, v
+    else:
+        return s
+
+
 def _check_convergence_svd(checks):
     checks = compss_wait_on(checks)
     return not np.array(checks).any()
@@ -394,6 +514,67 @@ def _compute_rotation(coli_blocks, colj_blocks, eps):
         b = np.block([[bii, bij], [bij.T, bjj]])
         j, _, _ = np.linalg.svd(b)
         return j, True
+
+
+@task(coli_blocks={Type: COLLECTION_INOUT, Depth: 2},
+      colj_blocks={Type: COLLECTION_INOUT, Depth: 2},
+      add_coli_blocks={Type: COLLECTION_INOUT, Depth: 3},
+      add_colj_blocks={Type: COLLECTION_INOUT, Depth: 3},
+      returns=bool)
+def _compute_rotation_and_rotate(coli_blocks, colj_blocks, eps, add_coli_blocks=[], add_colj_blocks=[]):
+    """ Computes rotation and rotates specified blocks.
+
+        Parameters
+        ----------
+        coli_blocks, colj_blocks : ds-arrays
+            Input ds-arrays.
+        eps
+        add_coli_blocks : collection of ds-arrays
+        add_colj_blocks : collection of ds-arrays
+        block_size : tuple of two ints, optional
+            Block size of the resulting array. Defaults to the block size of `b`.
+
+        Returns
+        -------
+        check : bool
+
+        Raises
+        ------
+        Exception
+            If collections are of different lengths
+        """
+
+    coli = Array._merge_blocks(coli_blocks)
+    colj = Array._merge_blocks(colj_blocks)
+
+    bii = coli.T @ coli
+    bjj = colj.T @ colj
+    bij = coli.T @ colj
+
+    min_shape = (min(bii.shape[0], bjj.shape[0]),
+                 min(bii.shape[1], bjj.shape[1]))
+
+    tol = eps * np.sqrt(np.sum([[bii[i][j] * bjj[i][j]
+                                 for j in range(min_shape[1])]
+                                for i in range(min_shape[0])]))
+
+    if np.linalg.norm(bij) <= tol:
+        return False
+    else:
+        b = np.block([[bii, bij], [bij.T, bjj]])
+        j, _, _ = np.linalg.svd(b)
+        _rotate(coli_blocks, colj_blocks, j)
+
+        # if available, rotate additional blocks
+        if len(add_coli_blocks) != len(add_colj_blocks):
+            raise Exception(
+                "Collections of blocks i and j have to be of the same size. Got: %s and %s" %
+                (len(add_coli_blocks), len(add_colj_blocks)))
+
+        for i in range(len(add_coli_blocks)):
+            _rotate(add_coli_blocks[i], add_colj_blocks[i], j)
+
+        return True
 
 
 @task(coli_blocks={Type: COLLECTION_INOUT, Depth: 2},
