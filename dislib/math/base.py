@@ -168,18 +168,23 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
         checks = []
         v_rot = []
 
-        for j in range(x._n_blocks[1]):
-            for i in range(j):
-                coli_x = x._get_col_block(i)
-                colj_x = x._get_col_block(j)
+        pairings = itertools.combinations_with_replacement(
+            range(x._n_blocks[1]), 2
+        )
 
-                rot, check = _compute_rotation_and_rotate(
-                    coli_x._blocks, colj_x._blocks, eps
-                )
-                checks.append(check)
+        for i, j in pairings:
+            if i >= j:
+                continue
+            coli_x = x._get_col_block(i)
+            colj_x = x._get_col_block(j)
 
-                if compute_uv:
-                    v_rot.append((i, j, rot))
+            rot, check = _compute_rotation_and_rotate(
+                coli_x._blocks, colj_x._blocks, eps
+            )
+            checks.append(check)
+
+            if compute_uv:
+                v_rot.append((i, j, rot))
 
         for to_rot in v_rot:
             rot = compss_wait_on(to_rot[2])
