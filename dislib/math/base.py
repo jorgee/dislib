@@ -1,7 +1,7 @@
 import itertools
 
 import numpy as np
-from pycompss.api.api import compss_delete_object, compss_wait_on, compss_barrier
+from pycompss.api.api import compss_delete_object, compss_wait_on
 from pycompss.api.parameter import COLLECTION_OUT, Type, Depth, \
     COLLECTION_INOUT, COLLECTION_IN
 from pycompss.api.task import task
