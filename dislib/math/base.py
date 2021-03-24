@@ -1,7 +1,7 @@
 import itertools
 
 import numpy as np
-from pycompss.api.api import compss_delete_object, compss_wait_on
+from pycompss.api.api import compss_delete_object, compss_wait_on, compss_barrier
 from pycompss.api.parameter import COLLECTION_OUT, Type, Depth, \
     COLLECTION_INOUT, COLLECTION_IN
 from pycompss.api.task import task
@@ -162,10 +162,14 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
     if compute_uv:
         v = identity(x.shape[1], (x._reg_shape[1], x._reg_shape[1]))
 
-    checks = True
+    prev_it_v_rot_indices = []
+    prev_it_v_rot = []
 
-    while not _check_convergence_svd(checks):
+    converged = False
+
+    while not converged:
         checks = []
+        v_rot_indices = []
         v_rot = []
 
         pairings = itertools.combinations_with_replacement(
@@ -184,16 +188,18 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
             checks.append(check)
 
             if compute_uv:
-                v_rot.append((i, j, rot))
+                v_rot_indices.append((i, j))
+                v_rot.append(rot)
 
-        for to_rot in v_rot:
-            rot = compss_wait_on(to_rot[2])
-            if rot is None:
-                continue
-            else:
-                coli_v = v._get_col_block(to_rot[0])
-                colj_v = v._get_col_block(to_rot[1])
-                _rotate(coli_v._blocks, colj_v._blocks, rot)
+        converged, rotate_this_it = _check_convergence_svd(checks)
+
+        # rotate only those objects in the current iteration that are certainly synchronized
+        # and the objects from the previous iteration
+        if compute_uv:
+            _rotate_blocks(v, prev_it_v_rot, prev_it_v_rot_indices)
+            _rotate_blocks(v, v_rot[:rotate_this_it], v_rot_indices[:rotate_this_it])
+            prev_it_v_rot_indices = v_rot_indices[rotate_this_it:]
+            prev_it_v_rot = v_rot[rotate_this_it:]
 
     s = x.norm(axis=0)
 
@@ -212,9 +218,30 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
         return s
 
 
+def _rotate_blocks(v, rot_list, ind_list):
+    v_rot = compss_wait_on(rot_list)
+    for i in range(len(ind_list)):
+        rot = v_rot[i]
+        if rot is None:
+            continue
+        else:
+            coli_v = v._get_col_block(ind_list[i][0])
+            colj_v = v._get_col_block(ind_list[i][1])
+            _rotate(coli_v._blocks, colj_v._blocks, rot)
+
+
+# returns:
+# the flag indicating the convergence
+# the index +1 of the check that indicates no convergence
+# it is guaranteed that the objects until this index (inclusive)
+# are synchronized
 def _check_convergence_svd(checks):
-    checks = compss_wait_on(checks)
-    return not np.array(checks).any()
+    number_of_checks = len(checks)
+    for i in range(number_of_checks):
+        if compss_wait_on(checks[i]):
+            return False, i + 1
+
+    return True, number_of_checks
 
 
 def _compute_u(a):
