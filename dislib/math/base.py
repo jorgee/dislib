@@ -162,15 +162,10 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
     if compute_uv:
         v = identity(x.shape[1], (x._reg_shape[1], x._reg_shape[1]))
 
-    prev_it_v_rot_indices = []
-    prev_it_v_rot = []
-
     converged = False
 
     while not converged:
         checks = []
-        v_rot_indices = []
-        v_rot = []
 
         pairings = itertools.combinations_with_replacement(
             range(x._n_blocks[1]), 2
@@ -188,18 +183,11 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
             checks.append(check)
 
             if compute_uv:
-                v_rot_indices.append((i, j))
-                v_rot.append(rot)
+                coli_v = v._get_col_block(i)
+                colj_v = v._get_col_block(j)
+                _rotate(coli_v._blocks, colj_v._blocks, rot)
 
         converged, rotate_this_it = _check_convergence_svd(checks)
-
-        # rotate only those objects in the current iteration that are certainly synchronized
-        # and the objects from the previous iteration
-        if compute_uv:
-            _rotate_blocks(v, prev_it_v_rot, prev_it_v_rot_indices)
-            _rotate_blocks(v, v_rot[:rotate_this_it], v_rot_indices[:rotate_this_it])
-            prev_it_v_rot_indices = v_rot_indices[rotate_this_it:]
-            prev_it_v_rot = v_rot[rotate_this_it:]
 
     s = x.norm(axis=0)
 
