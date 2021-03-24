@@ -162,9 +162,9 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
     if compute_uv:
         v = identity(x.shape[1], (x._reg_shape[1], x._reg_shape[1]))
 
-    converged = False
+    checks = [True]
 
-    while not converged:
+    while not _check_convergence_svd(checks):
         checks = []
 
         pairings = itertools.combinations_with_replacement(
@@ -187,8 +187,6 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
                 colj_v = v._get_col_block(j)
                 _rotate(coli_v._blocks, colj_v._blocks, rot)
 
-        converged, rotate_this_it = _check_convergence_svd(checks)
-
     s = x.norm(axis=0)
 
     if sort:
@@ -206,30 +204,12 @@ def svd(a, compute_uv=True, sort=True, copy=True, eps=1e-9):
         return s
 
 
-def _rotate_blocks(v, rot_list, ind_list):
-    v_rot = compss_wait_on(rot_list)
-    for i in range(len(ind_list)):
-        rot = v_rot[i]
-        if rot is None:
-            continue
-        else:
-            coli_v = v._get_col_block(ind_list[i][0])
-            colj_v = v._get_col_block(ind_list[i][1])
-            _rotate(coli_v._blocks, colj_v._blocks, rot)
-
-
-# returns:
-# the flag indicating the convergence
-# the index +1 of the check that indicates no convergence
-# it is guaranteed that the objects until this index (inclusive)
-# are synchronized
 def _check_convergence_svd(checks):
-    number_of_checks = len(checks)
-    for i in range(number_of_checks):
+    for i in range(len(checks)):
         if compss_wait_on(checks[i]):
-            return False, i + 1
+            return False
 
-    return True, number_of_checks
+    return True
 
 
 def _compute_u(a):
